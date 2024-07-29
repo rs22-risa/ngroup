@@ -3,6 +3,8 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:split_view/split_view.dart';
 
+import 'package:universal_io/io.dart';
+
 import '../core/adaptive.dart';
 import '../core/notched_shape.dart';
 import '../group/options_view.dart';
@@ -140,7 +142,7 @@ class TwoPane extends HookConsumerWidget {
                 },
               ),
               const SizedBox(width: 16),
-              if (!Adaptive.isDesktop)
+              if (Platform.isMacOS || !Adaptive.isDesktop)
                 BottomAppBarButton(
                   icon: Icons.share,
                   enabled: !noThread,

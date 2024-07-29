@@ -45,6 +45,7 @@ class MyApp extends HookWidget {
       scrollBehavior: const MaterialScrollBehavior().copyWith(dragDevices: {
         PointerDeviceKind.touch,
         PointerDeviceKind.mouse,
+        PointerDeviceKind.trackpad
       }),
       themeMode: Settings.theme.val,
       theme: lightNGroupThemeData,

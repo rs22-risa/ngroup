@@ -31,13 +31,13 @@ class Adaptive {
 
   static initDataPath() async {
     if (kIsWeb) return;
-    if (!isDesktop) {
+    if (Platform.isMacOS || !isDesktop) {
       _dataPath = (await getApplicationSupportDirectory()).path;
     }
   }
 
   static initWindow() async {
-    if (!kIsWeb && isDesktop) {
+    if (!kIsWeb && !Platform.isMacOS && isDesktop) {
       await windowManager.ensureInitialized();
 
       WindowOptions windowOptions = WindowOptions(
@@ -74,7 +74,7 @@ class Adaptive {
   }
 
   static Widget desktopFrame(Widget child) {
-    if (kIsWeb || !isDesktop) return child;
+    if (kIsWeb || Platform.isMacOS || !isDesktop) return child;
     return WindowShadow(WindowFrame(child));
   }
 

@@ -31,6 +31,10 @@ class Adaptive {
 
   static initDataPath() async {
     if (kIsWeb) return;
+    if (Platform.isMacOS || Platform.isIOS){
+      _dataPath = (await getApplicationDocumentsDirectory()).path;
+      return;
+    }
     if (Platform.isMacOS || !isDesktop) {
       _dataPath = (await getApplicationSupportDirectory()).path;
     }

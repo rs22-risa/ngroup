@@ -1,12 +1,10 @@
-import 'dart:io';
-
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:flutter_linkify/flutter_linkify.dart';
+import 'package:linkify/linkify.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:visibility_detector/visibility_detector.dart';
@@ -17,6 +15,7 @@ import 'package:fwfh_url_launcher/fwfh_url_launcher.dart';
 
 import '../core/adaptive.dart';
 import '../core/block_painter.dart';
+import '../core/html_simplifier.dart';
 import '../core/string_utils.dart';
 import '../core/datetime_utils.dart';
 import '../core/theme.dart';
@@ -66,7 +65,6 @@ class PostView extends HookConsumerWidget {
               padding: const EdgeInsets.all(4),
               child: CustomMaterialIndicator(
                 displacement: 20,
-                withRotation: false,
                 backgroundColor: Colors.transparent,
                 onRefresh: () async {
                   Future.delayed(
@@ -81,7 +79,7 @@ class PostView extends HookConsumerWidget {
                       children: [
                         Container(
                           decoration: BoxDecoration(
-                              color: colorScheme.surfaceVariant,
+                              color: colorScheme.surfaceContainerHighest,
                               shape: BoxShape.circle,
                               border: Border.all(
                                   color: colorScheme.outline.withOpacity(0.4))),
@@ -200,7 +198,7 @@ class PostNext extends HookConsumerWidget {
           : Card(
               key: ValueKey(text),
               elevation: 2,
-              color: colorScheme.surfaceVariant,
+              color: colorScheme.surfaceContainerHighest,
               shape: RoundedRectangleBorder(
                   side: BorderSide(color: colorScheme.outline.withOpacity(0.4)),
                   borderRadius: BorderRadius.circular(8)),
@@ -449,40 +447,11 @@ TextSpan _senderTextSpan(BuildContext context, PostData data,
 }
 
 class NetworkImageFactory extends WidgetFactory with UrlLauncherFactory {
-  NetworkImageFactory(this.ref, this.index, this.notifier, this.images);
+  NetworkImageFactory(this.post, this.loader);
 
-  final WidgetRef ref;
-  final int index;
-  final PostImagesNotifier notifier;
-  final List<PostImage> images;
-  final urls = <String>[];
-
-  static final HttpClient _httpClient = HttpClient()..autoUncompress = false;
-
-  Future<void> getData(String url) async {
-    var resolved = Uri.base.resolve(url);
-    var request = await _httpClient.getUrl(resolved);
-    var response = await request.close();
-    if (response.statusCode != HttpStatus.ok) {
-      await response.drain<List<int>>(<int>[]);
-      return;
-    }
-    var bytes = await consolidateHttpClientResponseBytes(response);
-    var regex = RegExp(r'(?<=\/)[^\/\?#]+(?=[^\/]*$)');
-    var filename = regex.firstMatch(url)?[0] ?? 'image.jpg';
-    if (!filename.contains('.')) {
-      var filename2 = url.substring(0, url.lastIndexOf('/'));
-      filename2 = regex.firstMatch(filename2)?[0] ?? 'image.jpg';
-      if (filename2.contains('.')) filename = filename2;
-    }
-    var index = urls.indexOf(url);
-    var image = PostImage()
-      ..data = bytes
-      ..filename = filename
-      ..url = url
-      ..image = MemoryImage(bytes);
-    notifier.addImage(image, index, index);
-  }
+  final int post;
+  final urls = <String>{};
+  final PostsLoader loader;
 
   @override
   Widget? buildImage(BuildTree tree, ImageMetadata data) {
@@ -495,16 +464,18 @@ class NetworkImageFactory extends WidgetFactory with UrlLauncherFactory {
       return super.buildImageWidget(tree, src);
     }
     if (!kIsWeb) {
-      var image = images.firstWhereOrNull((e) => e.url == url);
-      if (image == null) {
-        urls.add(url);
-        getData(url);
-      }
+      Future(() => loader.addLinkPreview(url, post, urls.length));
+      urls.add(url);
     }
-    return RemoteImage(
-      url,
-      width: src.width,
-      height: src.height,
+    return ConstrainedBox(
+      constraints:
+          BoxConstraints(maxWidth: Settings.linkedImageMaxWidth.val.toDouble()),
+      child: RemoteImage(
+        url,
+        post,
+        width: src.width,
+        height: src.height,
+      ),
     );
   }
 }
@@ -522,50 +493,88 @@ class PostBody extends HookConsumerWidget {
     var state = data.state;
     var filters = ref.read(filterProvider);
     var blocked = Settings.blockSenders.val.contains(data.parent?.post.from);
-    var quote = ref.read(postsLoader).getQuoteData(data);
+    var loader = ref.read(postsLoader);
+    var quote = loader.getQuoteData(data);
     if ((blocked && Settings.showQuote.val != ShowQuote.never) ||
         (CaptureView.of(context) && ref.read(selectedPostProvider) != '')) {
       quote = data.parent;
     }
-    var notifier = ref.read(postImagesProvider.notifier);
-    var images = ref.read(postImagesProvider);
 
-    final showHtml = useState(data.html);
+    final htmlState = useState(data.htmlState);
+    var showHtml = htmlState.value == PostHtmlState.html ||
+        htmlState.value == PostHtmlState.simplify;
+    var textStyle =
+        const TextStyle(color: Colors.blueAccent, fontWeight: FontWeight.bold);
+    onTap(PostHtmlState v) => TapGestureRecognizer()
+      ..onTap = () {
+        data.htmlState = htmlState.value = v;
+        loader.rebuildLinkPreview(data);
+      };
 
     var quoteBody = [
       if (quote != null) PostQuote(quote),
-      if (body?.html != null && !showHtml.value)
+      if (body?.html != null &&
+          Settings.htmlMode.val == PostHtmlState.showOptions)
         Text.rich(
           TextSpan(
-            text: 'Switch to ',
+            text: 'Switch to [ ',
             style: TextStyle(
                 color: colorScheme.onPrimaryContainer,
                 fontWeight: FontWeight.bold),
             children: [
               TextSpan(
-                  text: 'html',
-                  style: const TextStyle(
-                      color: Colors.blueAccent, fontWeight: FontWeight.bold),
-                  recognizer: TapGestureRecognizer()
-                    ..onTap = () => data.html = showHtml.value = true),
-              const TextSpan(text: ' version\n')
+                text: 'text',
+                style: htmlState.value == PostHtmlState.text ? null : textStyle,
+                recognizer: htmlState.value == PostHtmlState.text
+                    ? null
+                    : onTap(PostHtmlState.text),
+              ),
+              const TextSpan(text: ' | '),
+              TextSpan(
+                text: 'html',
+                style: htmlState.value == PostHtmlState.html ? null : textStyle,
+                recognizer: htmlState.value == PostHtmlState.html
+                    ? null
+                    : onTap(PostHtmlState.html),
+              ),
+              const TextSpan(text: ' | '),
+              TextSpan(
+                text: 'simplify',
+                style: htmlState.value == PostHtmlState.simplify
+                    ? null
+                    : textStyle,
+                recognizer: htmlState.value == PostHtmlState.simplify
+                    ? null
+                    : onTap(PostHtmlState.simplify),
+              ),
+              const TextSpan(text: ' | '),
+              TextSpan(
+                text: 'textify',
+                style:
+                    htmlState.value == PostHtmlState.textify ? null : textStyle,
+                recognizer: htmlState.value == PostHtmlState.textify
+                    ? null
+                    : onTap(PostHtmlState.textify),
+              ),
+              const TextSpan(text: ' ] version\n')
             ],
           ),
           textScaler: TextScaler.linear(Settings.contentScale.val / 100),
         ),
-      if (body?.html != null && showHtml.value)
+      if (body?.html != null && showHtml)
         MediaQuery(
           data: MediaQuery.of(context).copyWith(
               textScaler: TextScaler.linear(Settings.contentScale.val / 100)),
           child: HtmlWidget(
-            body!.html!,
+            htmlState.value == PostHtmlState.html
+                ? body?.html ?? ''
+                : HtmlSimplifier.simplifyHtml(body?.html ?? ''),
             buildAsync: false,
             enableCaching: true,
-            factoryBuilder: () =>
-                NetworkImageFactory(ref, data.index, notifier, images),
+            factoryBuilder: () => NetworkImageFactory(data.index, loader),
           ),
         )
-      else if (body != null && body.text.isNotEmpty && !showHtml.value)
+      else if (body != null && _getBodyText(data).isNotEmpty)
         PostBodyText(data, false),
     ];
 
@@ -580,8 +589,13 @@ class PostBody extends HookConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: quoteBody),
-        if (body.links.any((e) => e.enabled)) PostLinkPreviews(data),
-        if (body.images.isNotEmpty && !data.html) PostImages(data),
+        if (Settings.showLinkPreview.val &&
+            !Settings.embedLinkPreview.val &&
+            body.links.any((e) => e.enabled))
+          PostLinkPreviews(data),
+        if (ref.watch(postImagesProvider.select((list) =>
+            list.any((image) => image.post == data.index && !image.embed))))
+          PostImages(data),
         if (body.files.isNotEmpty) PostFiles(data),
         if (state.reply
             .where((e) => e.state.inside)
@@ -725,6 +739,12 @@ class PostShortReply extends ConsumerWidget {
   }
 }
 
+String _getBodyText(PostData data) {
+  return data.body?.html != null && data.htmlState == PostHtmlState.textify
+      ? HtmlSimplifier.textifyHtml(data.body?.html ?? '')
+      : data.body?.text ?? '';
+}
+
 class CustomScrollBehavior extends MaterialScrollBehavior {
   const CustomScrollBehavior();
   @override
@@ -740,16 +760,183 @@ class PostBodyText extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     var colorScheme = Theme.of(context).colorScheme;
+    var textTheme = Theme.of(context).textTheme;
     var filters = ref.read(filterProvider);
+    var loader = ref.read(postsLoader);
 
     final more = useState(false);
     final clearSelection = useState(0);
 
-    var text = data.body?.text ?? '';
+    var text = _getBodyText(data);
     if (short) text = text.noLinebreak;
     text += ' ';
     var hide = Settings.hideText.val;
     var blocked = Settings.blockSenders.val.contains(data.parent?.post.from);
+
+    TextSpan linkifyTextSpan(String text) {
+      var urls = <String>{};
+      var linkifies =
+          linkify(text, options: const LinkifyOptions(humanize: false));
+      var spans = linkifies.expand((e) {
+        if (e is! LinkableElement) return [TextSpan(text: e.text)];
+        if (e is EmailElement) return [TextSpan(text: e.text)];
+
+        var link = loader.getLinkPreview(e.url);
+        var embed = link.isImage
+            ? Settings.showLinkedImage.val && Settings.embedLinkedImage.val
+            : Settings.showLinkPreview.val && Settings.embedLinkPreview.val;
+        if (kIsWeb ||
+            !embed ||
+            (!link.isImage && link.ready && !link.enabled)) {
+          return [
+            const WidgetSpan(
+                child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: 2),
+              child: Icon(Icons.link, size: 16),
+            )),
+            TextSpan(
+              text: link.url.decodeUrl,
+              style: const TextStyle(
+                color: Colors.blueAccent,
+                decoration: TextDecoration.underline,
+              ),
+              recognizer: TapGestureRecognizer()
+                ..onTap = () => launchUrlString(link.url),
+            ),
+          ];
+        } else if (!urls.add(link.url)) {
+          return [];
+        } else if (!link.ready) {
+          return [
+            const WidgetSpan(
+              alignment: PlaceholderAlignment.baseline,
+              baseline: TextBaseline.ideographic,
+              child: Padding(
+                padding: EdgeInsets.only(right: 4),
+                child: SizedBox.square(
+                    dimension: 12,
+                    child: CircularProgressIndicator(strokeWidth: 2)),
+              ),
+            ),
+            TextSpan(
+              text: link.url.decodeUrl,
+              style: const TextStyle(
+                color: Colors.blueAccent,
+                decoration: TextDecoration.underline,
+              ),
+              recognizer: TapGestureRecognizer()
+                ..onTap = () => launchUrlString(e.url),
+            ),
+          ];
+        } else if (link.isImage) {
+          return [
+            WidgetSpan(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                    maxWidth: Settings.linkedImageMaxWidth.val.toDouble()),
+                child: GalleryCardItem.url(link.url, data.index, 'remote-image',
+                    border: true),
+              ),
+            )
+          ];
+        } else if (link.enabled) {
+          return [
+            WidgetSpan(
+              child: Card(
+                color: colorScheme.surfaceContainerHighest,
+                shape: RoundedRectangleBorder(
+                  side: BorderSide(color: colorScheme.outline.withOpacity(0.4)),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Table(
+                  columnWidths: link.image == null
+                      ? null
+                      : const {0: FixedColumnWidth(80)},
+                  children: [
+                    TableRow(
+                      children: [
+                        if (link.image != null)
+                          TableCell(
+                              verticalAlignment:
+                                  TableCellVerticalAlignment.fill,
+                              child: GalleryCardItem.url(
+                                  e.url, data.index, 'link-image')),
+                        InkWell(
+                          onTap: () => launchUrlString(link.url),
+                          child: SizedBox(
+                            height: link.image == null ? null : 80,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Ink(
+                                  decoration: BoxDecoration(
+                                      color: colorScheme.primaryContainer
+                                          .withOpacity(0.8)),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 4, vertical: 1),
+                                    child: Text(
+                                      link.title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: textTheme.bodySmall?.copyWith(
+                                          color:
+                                              colorScheme.onTertiaryContainer,
+                                          fontWeight: FontWeight.bold),
+                                    ),
+                                  ),
+                                ),
+                                if (link.image != null)
+                                  Expanded(
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 4),
+                                      child: Text(
+                                        link.description,
+                                        maxLines: 3,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: textTheme.bodySmall,
+                                      ),
+                                    ),
+                                  )
+                                else if (link.description.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 4),
+                                    child: Text(
+                                      link.description,
+                                      maxLines: 3,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: textTheme.bodySmall,
+                                    ),
+                                  ),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 4, vertical: 1),
+                                  child: Text(
+                                    link.url.decodeUrl,
+                                    maxLines: 1,
+                                    style: textTheme.labelSmall?.copyWith(
+                                        color: Colors.blueAccent,
+                                        decoration: TextDecoration.underline),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            )
+          ];
+        }
+        return [];
+      });
+      return TextSpan(children: spans.cast<InlineSpan>().toList());
+    }
 
     var span = TextSpan(children: [
       if (data.state.inside &&
@@ -758,20 +945,15 @@ class PostBodyText extends HookConsumerWidget {
         WidgetSpan(child: PostState(data)),
         _senderTextSpan(context, data),
       ],
-      if (data.state.error)
+      if (data.state.error) ...[
         WidgetSpan(
             child: Padding(
           padding: const EdgeInsets.only(right: 4),
           child: Icon(Icons.error, size: 18, color: colorScheme.error),
         )),
-      LinkifySpan(
-          text: text,
-          style: data.state.error ? TextStyle(color: colorScheme.error) : null,
-          linkStyle: const TextStyle(
-            color: Colors.blueAccent,
-            decoration: TextDecoration.underline,
-          ),
-          onOpen: (link) => launchUrlString(link.url)),
+        TextSpan(text: text, style: TextStyle(color: colorScheme.error)),
+      ],
+      if (!data.state.error) linkifyTextSpan(text),
       if (data.state.error) ...[
         const TextSpan(text: ' '),
         TextSpan(
@@ -781,7 +963,7 @@ class PostBodyText extends HookConsumerWidget {
             recognizer: TapGestureRecognizer()
               ..onTap = () => ref.read(postsLoader).retry()),
         const TextSpan(text: ' '),
-      ]
+      ],
     ]);
 
     return VisibilityDetector(
@@ -925,8 +1107,8 @@ class PostImages extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    var colorScheme = Theme.of(context).colorScheme;
-    var images = ref.read(postImagesProvider);
+    var images = ref.watch(postImagesProvider.select((list) =>
+        list.where((image) => image.post == data.index && !image.embed)));
     return VisibilityDetector(
       key: Key('${data.post.messageId} image'),
       onVisibilityChanged: (info) {
@@ -937,21 +1119,12 @@ class PostImages extends ConsumerWidget {
           spacing: 4,
           runSpacing: 4,
           children: [
-            ...data.body!.images
-                .map((e) => images.indexWhere((img) => e.id == img.id))
-                .where((e) => e != -1)
-                .map(
-                  (e) => Card(
-                    shape: RoundedRectangleBorder(
-                        side: BorderSide(
-                            color: colorScheme.outline.withOpacity(0.4)),
-                        borderRadius: BorderRadius.circular(8)),
-                    child: SizedBox(
-                      height: Settings.smallPreview.val ? 100 : null,
-                      child: GalleryItem(e, 'post-image'),
-                    ),
-                  ),
-                ),
+            ...images.map(
+              (e) => SizedBox(
+                height: Settings.smallPreview.val ? 100 : null,
+                child: GalleryCardItem.id(e.id, 'post-image', border: true),
+              ),
+            ),
           ],
         ),
       ),
@@ -980,7 +1153,7 @@ class PostLinkPreviews extends StatelessWidget {
           itemBuilder: (_, index) {
             var e = links[index];
             return Card(
-              color: colorScheme.surfaceVariant,
+              color: colorScheme.surfaceContainerHighest,
               shape: RoundedRectangleBorder(
                   side: BorderSide(color: colorScheme.outline.withOpacity(0.4)),
                   borderRadius: BorderRadius.circular(8)),
@@ -1039,7 +1212,7 @@ class PostLinkPreviews extends StatelessWidget {
                                         padding: const EdgeInsets.all(4.0),
                                         child: Text(
                                           e.description,
-                                          maxLines: e.image == null ? null : 2,
+                                          maxLines: e.image == null ? 10 : 2,
                                           overflow: e.image == null
                                               ? null
                                               : TextOverflow.ellipsis,

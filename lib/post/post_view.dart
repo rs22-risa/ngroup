@@ -565,13 +565,19 @@ class PostBody extends HookConsumerWidget {
         MediaQuery(
           data: MediaQuery.of(context).copyWith(
               textScaler: TextScaler.linear(Settings.contentScale.val / 100)),
-          child: HtmlWidget(
-            htmlState.value == PostHtmlState.html
-                ? body?.html ?? ''
-                : HtmlSimplifier.simplifyHtml(body?.html ?? ''),
-            buildAsync: false,
-            enableCaching: true,
-            factoryBuilder: () => NetworkImageFactory(data.index, loader),
+          child: VisibilityDetector(
+            key: Key('${data.post.messageId} html'),
+            onVisibilityChanged: (info) {
+              if (context.mounted) ref.read(postsLoader).setVisible(data, info);
+            },
+            child: HtmlWidget(
+              htmlState.value == PostHtmlState.html
+                  ? body?.html ?? ''
+                  : HtmlSimplifier.simplifyHtml(body?.html ?? ''),
+              buildAsync: false,
+              enableCaching: true,
+              factoryBuilder: () => NetworkImageFactory(data.index, loader),
+            ),
           ),
         )
       else if (body != null && _getBodyText(data).isNotEmpty)
@@ -892,14 +898,17 @@ class PostBodyText extends HookConsumerWidget {
                                       padding: const EdgeInsets.symmetric(
                                           horizontal: 4),
                                       child: Text(
-                                        link.description,
+                                        link.description == link.url
+                                            ? ''
+                                            : link.description,
                                         maxLines: 3,
                                         overflow: TextOverflow.ellipsis,
                                         style: textTheme.bodySmall,
                                       ),
                                     ),
                                   )
-                                else if (link.description.isNotEmpty)
+                                else if (link.description.isNotEmpty &&
+                                    link.description != link.url)
                                   Padding(
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 4),

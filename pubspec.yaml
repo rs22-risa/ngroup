@@ -1,7 +1,7 @@
 name: ngroup
 description: "A newsgroup reader app."
 publish_to: 'none'
-version: 0.6.1+5
+version: 0.7.0
 
 environment:
   sdk: '>=3.2.6 <4.0.0'
@@ -57,6 +57,7 @@ dependencies:
   html: ^0.15.4
   validators: ^3.0.0
   html_unescape: ^2.0.0
+  receive_sharing_intent: ^1.8.0
 
 dev_dependencies:
   flutter_test:

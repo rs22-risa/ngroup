@@ -17,9 +17,9 @@ import Flutter
           let new_db_file = URL.documents.appendingPathComponent(dbFile)
           let old_db_file = URL.applicationSupport.appendingPathComponent(dbFile)
           
-          if(FileManager.default.fileExists(atPath: old_db_file.absoluteString)){
+          if(FileManager.default.fileExists(atPath: old_db_file.path)){
               
-              if(!FileManager.default.fileExists(atPath: new_db_file.absoluteString) ||
+              if(!FileManager.default.fileExists(atPath: new_db_file.path) ||
                  (fileModificationDate(url: old_db_file) > fileModificationDate(url: new_db_file))){
                   
                   do{

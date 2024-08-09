@@ -1,12 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
+import 'package:collection/collection.dart';
 import 'package:enough_mail/enough_mail.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:path/path.dart';
+import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'package:universal_io/io.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 import 'package:image/image.dart' as img;
@@ -39,6 +42,11 @@ class ImageData {
   bool original = true;
   bool hqResize = false;
   Uint8List imageData = Uint8List(0);
+}
+
+class SharingIntent {
+  String text = '';
+  List<ImageData> images = [];
 }
 
 class WriteController {
@@ -75,6 +83,7 @@ class WriteController {
   var resizing = ValueNotifier(false);
 
   var rawQuote = '';
+  var sharingIntent = ValueNotifier<SharingIntent?>(null);
 
   WriteController(this.ref) {
     identity.addListener(_updateIdentity);
@@ -128,8 +137,78 @@ class WriteController {
   }
 
   String _getQuote() {
-    var text = const LineSplitter().convert(data.value?.body?.text ?? '');
-    return text.map((e) => '> $e').join('\n');
+    return _wrapText(data.value?.body?.text ?? '')
+        .map((e) => '> $e')
+        .join('\n');
+  }
+
+  List<String> _wrapText(String text) {
+    return const LineSplitter()
+        .convert(text)
+        .expand((e) => _wrapTextLine(e))
+        .toList();
+  }
+
+  List<String> _wrapTextLine(String text) {
+    var lines = <String>[];
+    var line = '';
+    var len = 0;
+    for (var char in text.characters) {
+      if (len + utf8.encode(char).length > 2000) {
+        var i = line.lastIndexOf(
+            RegExp(r'[\p{Z}\p{P}](?=\P{P})(?=\P{Z})', unicode: true));
+        i = max(
+            i,
+            line.lastIndexOf(RegExp(
+                r'[\p{Script=Hani}\p{Script=Hiragana}\p{Script=Katakana}]',
+                unicode: true)));
+        if (i != -1) {
+          lines.add(line.substring(0, i + 1));
+          line = line.substring(i + 1);
+          len = utf8.encode(line).length;
+        } else {
+          lines.add(line);
+          line = '';
+          len = 0;
+        }
+      }
+      len += utf8.encode(char).length;
+      line += char;
+    }
+    lines.add(line);
+    return lines;
+  }
+
+  List<String> _wrapHtml(String html) {
+    return const LineSplitter()
+        .convert(html)
+        .expand((e) => _wrapHtmlLine(e))
+        .toList();
+  }
+
+  List<String> _wrapHtmlLine(String html) {
+    var lines = <String>[];
+    var line = '';
+    var len = 0;
+    for (var char in html.characters) {
+      if (len + utf8.encode(char).length > 2000) {
+        var i = line.lastIndexOf(RegExp(r'\s((?=\S)[^<])+?>', unicode: true));
+        i = max(i, line.lastIndexOf(RegExp(r'(?<=<)\S+>', unicode: true)));
+        if (i != -1) {
+          lines.add(line.substring(0, i + 1));
+          line = line.substring(i + 1);
+          len = utf8.encode(line).length;
+        } else {
+          lines.add(line);
+          line = '';
+          len = 0;
+        }
+      }
+      len += utf8.encode(char).length;
+      line += char;
+    }
+    lines.add(line);
+    return lines;
   }
 
   Set<FocusNode> getAllFocusNode() {
@@ -145,21 +224,26 @@ class WriteController {
 
   Widget contextMenuBuilder(BuildContext context, EditableTextState state) {
     var cause = SelectionChangedCause.toolbar;
-    return AdaptiveTextSelectionToolbar.editable(
-      anchors: state.contextMenuAnchors,
-      clipboardStatus: state.clipboardStatus.value,
-      onCopy: state.copyEnabled ? () => state.copySelection(cause) : null,
-      onCut: state.cutEnabled ? () => state.cutSelection(cause) : null,
-      onPaste: () async {
-        if (!await handlePaste(cause)) state.pasteText(cause);
-        state.hideToolbar();
-      },
-      onSelectAll: state.selectAllEnabled ? () => state.selectAll(cause) : null,
-      onLookUp: null,
-      onSearchWeb: null,
-      onShare: null,
-      onLiveTextInput: null,
-    );
+    var paste = ContextMenuButtonItem(
+        type: ContextMenuButtonType.paste,
+        onPressed: () async {
+          if (!await handlePaste(cause)) state.pasteText(cause);
+          state.hideToolbar();
+        },
+        label: 'Paste');
+    var buttonItems = state.contextMenuButtonItems.expand((e) {
+      if (e.type != ContextMenuButtonType.paste) return [e];
+      return [
+        paste,
+        ContextMenuButtonItem(
+            type: ContextMenuButtonType.paste,
+            onPressed: () => state.pasteText(cause),
+            label: 'Paste text'),
+      ];
+    }).toList();
+    if (buttonItems.isEmpty) buttonItems.add(paste);
+    return AdaptiveTextSelectionToolbar.buttonItems(
+        buttonItems: buttonItems, anchors: state.contextMenuAnchors);
   }
 
   Future<bool> handlePaste(SelectionChangedCause cause) async {
@@ -197,9 +281,28 @@ class WriteController {
     }
   }
 
+  Future<void> setSharingIntent(List<SharedMediaFile> list) async {
+    var text = '';
+    var imgs = <ImageData>[];
+    for (var s in list) {
+      if (s.type == SharedMediaType.text) text += '${s.path}\n';
+      if (s.type == SharedMediaType.image) {
+        var file = File(s.path);
+        var bytes = await file.readAsBytes();
+        imgs.add(ImageData(basename(file.path), bytes));
+        await file.delete();
+      }
+    }
+    if (subject.text.isEmpty) {
+      subject.text = const LineSplitter().convert(text).firstOrNull ?? '';
+    }
+    if (text.isNotEmpty) body.text = text;
+    images.value = [...images.value, ...imgs];
+    selectedFile.value ??= images.value.firstOrNull;
+  }
+
   void create(PostData? data) {
     this.data.value = data;
-
     var re = RegExp(r'^(Re: ?)*');
     var text = data?.post.subject ?? '';
     if (text.isNotEmpty) text = 'Re: ${text.replaceAll(re, '')}';
@@ -321,7 +424,9 @@ class WriteController {
           '\n\n${data.value?.post.from ?? 'Someone'} wrote: \n${quote.text}';
     }
     if (images.value.isNotEmpty) content += '\n';
+    content = _wrapText(content).join('\n');
     content = latin1.decode(utf8.encode(content));
+    html = _wrapHtml(html).join('\n');
     html = latin1.decode(utf8.encode(html));
 
     try {

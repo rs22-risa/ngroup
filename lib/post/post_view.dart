@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
@@ -757,6 +759,17 @@ class CustomScrollBehavior extends MaterialScrollBehavior {
   Widget buildScrollbar(context, child, details) => child;
 }
 
+class CustomWidgetSpan extends WidgetSpan {
+  const CustomWidgetSpan({
+    required this.size,
+    required super.child,
+    super.alignment,
+    super.baseline,
+    super.style,
+  });
+  final Size size;
+}
+
 class PostBodyText extends HookConsumerWidget {
   const PostBodyText(this.data, this.short, {super.key});
 
@@ -778,11 +791,16 @@ class PostBodyText extends HookConsumerWidget {
     text += ' ';
     var hide = Settings.hideText.val;
     var blocked = Settings.blockSenders.val.contains(data.parent?.post.from);
+    var linkifies =
+        linkify(text, options: const LinkifyOptions(humanize: false));
 
-    TextSpan linkifyTextSpan(String text) {
+    var sizeMap = useMemoized(() => <String, Size>{});
+    var sizeStream = useStreamController<MapEntry<String, Size>>();
+    var sizeData = useStream(sizeStream.stream).data;
+    if (sizeData != null) sizeMap.addEntries([sizeData]);
+
+    List<InlineSpan> linkifyTextSpan(String text) {
       var urls = <String>{};
-      var linkifies =
-          linkify(text, options: const LinkifyOptions(humanize: false));
       var spans = linkifies.expand((e) {
         if (e is! LinkableElement) return [TextSpan(text: e.text)];
         if (e is EmailElement) return [TextSpan(text: e.text)];
@@ -795,11 +813,13 @@ class PostBodyText extends HookConsumerWidget {
             !embed ||
             (!link.isImage && link.ready && !link.enabled)) {
           return [
-            const WidgetSpan(
-                child: Padding(
-              padding: EdgeInsets.symmetric(horizontal: 2),
-              child: Icon(Icons.link, size: 16),
-            )),
+            const CustomWidgetSpan(
+              size: Size(20, 16),
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: 2),
+                child: Icon(Icons.link, size: 16),
+              ),
+            ),
             TextSpan(
               text: link.url.decodeUrl,
               style: const TextStyle(
@@ -814,9 +834,10 @@ class PostBodyText extends HookConsumerWidget {
           return [];
         } else if (!link.ready) {
           return [
-            const WidgetSpan(
+            const CustomWidgetSpan(
               alignment: PlaceholderAlignment.baseline,
               baseline: TextBaseline.ideographic,
+              size: Size(16, 12),
               child: Padding(
                 padding: EdgeInsets.only(right: 4),
                 child: SizedBox.square(
@@ -835,19 +856,32 @@ class PostBodyText extends HookConsumerWidget {
             ),
           ];
         } else if (link.isImage) {
+          var maxWidth = Settings.linkedImageMaxWidth.val.toDouble();
           return [
-            WidgetSpan(
+            CustomWidgetSpan(
+              size: sizeMap.containsKey(link.url)
+                  ? sizeMap[link.url]!
+                  : Size.zero,
               child: ConstrainedBox(
-                constraints: BoxConstraints(
-                    maxWidth: Settings.linkedImageMaxWidth.val.toDouble()),
-                child: GalleryCardItem.url(link.url, data.index, 'remote-image',
-                    border: true),
+                constraints: BoxConstraints(maxWidth: maxWidth),
+                child: GalleryCardItem.url(
+                  link.url,
+                  data.index,
+                  'remote-image',
+                  border: true,
+                  onSize: (w, h) => sizeStream.add(MapEntry(link.url,
+                      Size(min(w.toDouble(), maxWidth), h.toDouble()))),
+                ),
               ),
             )
           ];
         } else if (link.enabled) {
+          var description =
+              link.description == link.url ? '' : link.description;
+          description += link.image == null ? '' : '\n\n\n';
           return [
-            WidgetSpan(
+            CustomWidgetSpan(
+              size: const Size.fromHeight(80),
               child: Card(
                 color: colorScheme.surfaceContainerHighest,
                 shape: RoundedRectangleBorder(
@@ -870,7 +904,7 @@ class PostBodyText extends HookConsumerWidget {
                         InkWell(
                           onTap: () => launchUrlString(link.url),
                           child: SizedBox(
-                            height: link.image == null ? null : 80,
+                            // height: link.image == null ? null : 80,
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
@@ -892,28 +926,13 @@ class PostBodyText extends HookConsumerWidget {
                                     ),
                                   ),
                                 ),
-                                if (link.image != null)
-                                  Expanded(
-                                    child: Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 4),
-                                      child: Text(
-                                        link.description == link.url
-                                            ? ''
-                                            : link.description,
-                                        maxLines: 3,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: textTheme.bodySmall,
-                                      ),
-                                    ),
-                                  )
-                                else if (link.description.isNotEmpty &&
-                                    link.description != link.url)
+                                if (description.isNotEmpty ||
+                                    link.image != null)
                                   Padding(
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 4),
                                     child: Text(
-                                      link.description,
+                                      description,
                                       maxLines: 3,
                                       overflow: TextOverflow.ellipsis,
                                       style: textTheme.bodySmall,
@@ -944,13 +963,11 @@ class PostBodyText extends HookConsumerWidget {
         }
         return [];
       });
-      return TextSpan(children: spans.cast<InlineSpan>().toList());
+      return spans.cast<InlineSpan>().toList();
     }
 
     var span = TextSpan(children: [
-      if (data.state.inside &&
-          !blocked &&
-          filters.filterPost(data.parent!)) ...[
+      if (short && !blocked && filters.filterPost(data.parent!)) ...[
         WidgetSpan(child: PostState(data)),
         _senderTextSpan(context, data),
       ],
@@ -962,7 +979,7 @@ class PostBodyText extends HookConsumerWidget {
         )),
         TextSpan(text: text, style: TextStyle(color: colorScheme.error)),
       ],
-      if (!data.state.error) linkifyTextSpan(text),
+      if (!data.state.error) ...linkifyTextSpan(text),
       if (data.state.error) ...[
         const TextSpan(text: ' '),
         TextSpan(
@@ -982,11 +999,29 @@ class PostBodyText extends HookConsumerWidget {
       },
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final tp = TextPainter(
-              text: TextSpan(text: text),
-              textDirection: Directionality.of(context));
-          tp.layout(maxWidth: constraints.maxWidth);
-          final length = tp.computeLineMetrics().length;
+          var length = 1;
+          if (!short && !data.state.error) {
+            var tp = TextPainter(
+                text: span, textDirection: Directionality.of(context));
+            var dims = <PlaceholderDimensions>[];
+            span.visitChildren((s) {
+              if (s is CustomWidgetSpan) {
+                var width = s.size.width == double.infinity
+                    ? constraints.maxWidth
+                    : s.size.width;
+                var size = Size(width, s.size.height);
+                dims.add(PlaceholderDimensions(
+                  size: size,
+                  alignment: s.alignment,
+                  baseline: s.baseline,
+                ));
+              }
+              return true;
+            });
+            tp.setPlaceholderDimensions(dims);
+            tp.layout(maxWidth: constraints.maxWidth);
+            length = tp.computeLineMetrics().length;
+          }
           return GestureDetector(
             onLongPress: !Adaptive.isDesktop
                 ? null
@@ -1141,15 +1176,19 @@ class PostImages extends ConsumerWidget {
   }
 }
 
-class PostLinkPreviews extends StatelessWidget {
+class PostLinkPreviews extends ConsumerWidget {
   const PostLinkPreviews(this.data, {super.key});
 
   final PostData data;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     var colorScheme = Theme.of(context).colorScheme;
-    var links = data.body!.links.where((e) => e.enabled).toList();
+    var loader = ref.read(postsLoader);
+    var links = data.body!.links
+        .where((e) => e.enabled)
+        .map((e) => loader.getLinkPreview(e.url))
+        .toList();
     return Center(
       child: ConstrainedBox(
         constraints: BoxConstraints.tightFor(width: links.length * 300),
